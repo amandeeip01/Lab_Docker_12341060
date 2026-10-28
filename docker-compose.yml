@@ -1,0 +1,41 @@
+# Proximity Search API - full stack with one command:  docker compose up -d --build
+name: proximity-search
+
+services:
+  api:
+    build: ./api
+    image: proximity-api:1.0
+    container_name: proximity-api
+    environment:
+      PORT: 8000
+      WORKERS: ${API_WORKERS:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LINK_DIR: /data
+    volumes:
+      - ./data:/data:ro            # link files, editable on the host without rebuilding
+    networks:
+      - backend
+    expose:
+      - "8000"                     # reachable by other containers only, not published to the host
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    image: proximity-web:1.0
+    container_name: proximity-web
+    environment:
+      API_HOST: api                # the service name works as a hostname on the Docker network
+      API_PORT: 8000
+    ports:
+      - "${WEB_PORT:-8080}:80"     # the only port opened on the host
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      api:
+        condition: service_healthy # start nginx only after the API passes its health check
+    restart: unless-stopped
+
+networks:
+  frontend:
+  backend:

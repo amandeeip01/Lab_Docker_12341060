@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nearest Location Finder</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2330; --muted:#6b7280; --line:#e3e6eb; --acc:#2563eb; --hit:#dc2626; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:18px 20px 4px; }
+  h1 { margin:0; font-size:20px; }
+  header p { margin:4px 0 0; color:var(--muted); }
+  main { display:grid; grid-template-columns: 300px 1fr; gap:16px; padding:16px 20px 24px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input, select { width:100%; padding:8px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  button { margin-top:14px; width:100%; padding:10px; border:0; border-radius:6px; background:var(--acc); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .hint { font-size:12px; color:var(--muted); margin-top:8px; }
+  .err { color:var(--hit); margin-top:10px; font-size:13px; }
+  canvas { width:100%; max-width:520px; aspect-ratio:1; display:block; border:1px solid var(--line); border-radius:6px; cursor:crosshair; background:#fbfcfd; }
+  .out { display:grid; grid-template-columns: minmax(0,520px) 1fr; gap:16px; align-items:start; }
+  @media (max-width: 1100px) { .out { grid-template-columns: 1fr; } }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; }
+  td.n { font-variant-numeric: tabular-nums; }
+  .ids { font-family:ui-monospace, monospace; font-size:13px; background:var(--bg); padding:8px; border-radius:6px; word-break:break-all; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Nearest Location Finder</h1>
+  <p>Finds the 10 closest places of a category by road distance, within a radius.</p>
+</header>
+<main>
+  <form id="f" class="card">
+    <div class="row">
+      <div><label for="lat">Latitude</label><input id="lat" name="lat" type="number" step="any" min="0" max="1" value="0.5" required></div>
+      <div><label for="long">Longitude</label><input id="long" name="long" type="number" step="any" min="0" max="1" value="0.5" required></div>
+    </div>
+    <label for="cat">Category</label>
+    <select id="cat" name="cat">
+      <option>bank</option><option>cafe</option><option>hospital</option><option>park</option>
+      <option>pharmacy</option><option>restaurant</option><option>school</option><option>store</option>
+    </select>
+    <label for="rad">Radius</label>
+    <input id="rad" name="rad" type="number" step="any" min="0" value="0.2" required>
+    <label for="link">Road link file (.txt, optional)</label>
+    <input id="link" name="link" type="file" accept=".txt,text/plain">
+    <div class="hint">No file = full grid of roads. Tip: click the map to set your position.</div>
+    <button id="go" type="submit">Search</button>
+    <div id="err" class="err"></div>
+  </form>
+
+  <section class="card">
+    <div class="out">
+      <canvas id="map" width="520" height="520"></canvas>
+      <div>
+        <div id="summary" class="hint" style="margin-top:0">Run a search to see results.</div>
+        <div id="idsWrap" hidden><label>IDs</label><div id="ids" class="ids"></div></div>
+        <table id="tbl" hidden>
+          <thead><tr><th>#</th><th>ID</th><th>Lat</th><th>Long</th><th>Road dist</th><th>Straight dist</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const cv = $("map"), ctx = cv.getContext("2d");
+const PAD = 16, S = cv.width - 2 * PAD;
+const px = (lon) => PAD + lon * S;          // x = longitude
+const py = (lat) => PAD + (1 - lat) * S;    // y = latitude (north up)
+let last = [];
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.strokeStyle = "#e3e6eb"; ctx.lineWidth = 1;
+  for (let i = 0; i <= 10; i++) {
+    const t = PAD + (i / 10) * S;
+    ctx.beginPath(); ctx.moveTo(t, PAD); ctx.lineTo(t, PAD + S); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PAD, t); ctx.lineTo(PAD + S, t); ctx.stroke();
+  }
+  const lat = +$("lat").value, lon = +$("long").value, rad = +$("rad").value;
+  // radius circle
+  ctx.fillStyle = "rgba(37,99,235,.08)"; ctx.strokeStyle = "#2563eb";
+  ctx.beginPath(); ctx.arc(px(lon), py(lat), rad * S, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+  // results
+  last.forEach((r, i) => {
+    ctx.fillStyle = r.reachable ? "#dc2626" : "#9ca3af";
+    ctx.beginPath(); ctx.arc(px(r.long), py(r.lat), 5, 0, 2 * Math.PI); ctx.fill();
+    ctx.fillStyle = "#1d2330"; ctx.font = "11px system-ui";
+    ctx.fillText(i + 1, px(r.long) + 7, py(r.lat) - 5);
+  });
+  // current position
+  ctx.fillStyle = "#2563eb";
+  ctx.beginPath(); ctx.arc(px(lon), py(lat), 6, 0, 2 * Math.PI); ctx.fill();
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.stroke();
+}
+
+cv.addEventListener("click", (e) => {
+  const b = cv.getBoundingClientRect(), k = cv.width / b.width;
+  const x = (e.clientX - b.left) * k, y = (e.clientY - b.top) * k;
+  const clamp = (v) => Math.min(1, Math.max(0, v));
+  $("long").value = clamp((x - PAD) / S).toFixed(4);
+  $("lat").value = clamp(1 - (y - PAD) / S).toFixed(4);
+  last = []; draw();
+});
+["lat", "long", "rad"].forEach((id) => $(id).addEventListener("input", draw));
+
+$("f").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("err").textContent = ""; $("go").disabled = true;
+  const fd = new FormData($("f"));
+  if (!$("link").files.length) fd.delete("link");
+  try {
+    const res = await fetch("/search/", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    last = data.results;
+    render(data);
+  } catch (err) {
+    $("err").textContent = "Error: " + err.message;
+  } finally {
+    $("go").disabled = false; draw();
+  }
+});
+
+function render(data) {
+  const rows = data.results;
+  $("summary").textContent = rows.length
+    ? `${rows.length} result${rows.length > 1 ? "s" : ""} found.`
+    : "No locations of this category inside the radius.";
+  $("idsWrap").hidden = !rows.length;
+  $("ids").textContent = data.ids.join(", ");
+  $("tbl").hidden = !rows.length;
+  const f = (v) => (v == null ? "unreachable" : v.toFixed(4));
+  $("tbl").tBodies[0].innerHTML = rows.map((r, i) =>
+    `<tr><td>${i + 1}</td><td>${r.id}</td><td class="n">${r.lat.toFixed(4)}</td><td class="n">${r.long.toFixed(4)}</td>` +
+    `<td class="n">${f(r.grid_distance)}</td><td class="n">${r.radial_distance.toFixed(4)}</td></tr>`).join("");
+}
+
+draw();
+</script>
+</body>
+</html>

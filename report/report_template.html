@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Docker Lab Report</title>
+<style>
+  @page { size: A4; margin: 15mm 15mm; }
+  :root { --ink:#1b1f24; --muted:#57606a; --rule:#d0d7de; --accent:#1d63ed; --code:#f3f4f6; }
+  body { font: 10pt/1.45 "Helvetica Neue", Arial, sans-serif; color: var(--ink); margin: 0 auto; max-width: 900px; padding: 0 16px; background: #fff; }
+  h1 { font-size: 18pt; margin: 0 0 4px; }
+  h2 { font-size: 13pt; margin: 18px 0 6px; padding-bottom: 3px; border-bottom: 2px solid var(--accent); break-after: avoid; }
+  h3 { font-size: 10.5pt; margin: 12px 0 4px; break-after: avoid; }
+  p, li { margin: 4px 0; }
+  ul, ol { padding-left: 20px; }
+  .sub { font-size: 12pt; color: var(--muted); margin-bottom: 4px; }
+  .meta { color: var(--muted); margin-bottom: 12px; }
+  code { font: 8.5pt Menlo, Consolas, monospace; background: var(--code); padding: 1px 3px; border-radius: 3px; }
+  pre { font: 7.5pt/1.35 Menlo, Consolas, monospace; background: var(--code); padding: 8px 10px; border-radius: 6px; white-space: pre-wrap; break-inside: avoid; margin: 6px 0 10px; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0 10px; font-size: 9pt; }
+  tr { break-inside: avoid; }
+  th, td { border: 1px solid var(--rule); padding: 4px 6px; text-align: left; vertical-align: top; }
+  th { background: #f6f8fa; }
+  td code { overflow-wrap: anywhere; }
+  table.err { table-layout: fixed; }
+  figure { margin: 8px 0 14px; break-inside: avoid; }
+  figure img { width: 100%; border: 1px solid var(--rule); border-radius: 4px; }
+  figcaption { font-size: 9pt; color: var(--muted); margin-top: 4px; }
+  figcaption b { color: var(--ink); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .two pre { margin: 0; }
+</style>
+</head>
+<body>
+
+<h1>Containerising the Lab 7 Proximity Search API</h1>
+<div class="sub">CSD Lab &ndash; Docker and Docker Compose</div>
+<div class="meta">Amandeeip Kammari &middot; Roll No. 12341060 &middot; amandeeip01@gmail.com &middot; October 2026</div>
+
+<p>In Lab 7 I built a proximity search API. You give it a position, a category (bank, cafe, hospital and so on), a radius and a road-link file, and it returns the 10 nearest places by road distance using Dijkstra on the road graph. It is a FastAPI app with a small HTML page for the UI. For this lab I put it in Docker so the whole thing starts with one command, <code>docker compose up -d --build</code>. Everything was done on my own MacBook (Apple M-series, macOS 15).</p>
+
+<h2>1. Docker design choices</h2>
+<p>In Lab 7 the API also served the web page, so it was one process. I split it into two services so each one has its own Dockerfile and its own job:</p>
+<pre>  Browser ──▶ localhost:8088 ──▶ [ web: nginx ] ──/search/──▶ [ api: FastAPI + NumPy ]
+                                  frontend + backend network      backend network only
+                                                                  ./data mounted at /data (read-only)</pre>
+<ul>
+<li><b>web</b> (nginx) serves <code>index.html</code> and forwards every <code>/search/</code> request to the API. It is the only container with a port open on my laptop.</li>
+<li><b>api</b> (FastAPI) does the actual search. It has no port open to the host, so the only way to reach it is through nginx.</li>
+</ul>
+
+<table>
+<tr><th>Choice</th><th>What I used</th><th>Why</th></tr>
+<tr><td>Base image (api)</td><td><code>python:3.13-slim</code></td><td>Same Python version as my Render deployment. The slim image is much smaller than the full one, and NumPy installs from a ready-made wheel, so no compilers are needed. Final image: 316 MB.</td></tr>
+<tr><td>Base image (web)</td><td><code>nginx:1.27-alpine</code></td><td>Tiny (76 MB) and made for serving static files and reverse proxying. Its built-in template feature fills environment variables into the config at start-up.</td></tr>
+<tr><td>Ports</td><td>web: host <code>8088</code> &rarr; container 80. api: 8000, <code>expose</code> only</td><td>Only one port is open to the outside. The host port comes from <code>.env</code>, which turned out to matter because 8080 was already taken (Section 3).</td></tr>
+<tr><td>Networks</td><td><code>frontend</code> (web) and <code>backend</code> (web + api)</td><td>Two user-defined bridge networks. On them, containers find each other by service name, so nginx just uses <code>http://api:8000</code> and no IP addresses are hard-coded.</td></tr>
+<tr><td>Volumes</td><td>Bind mount <code>./data:/data:ro</code> on api</td><td>Road-link files can be dropped into <code>data/</code> and used by name (<code>link=sample_link.txt</code>) without rebuilding the image. Read-only, because the API only needs to read them.</td></tr>
+<tr><td>Environment variables</td><td><code>.env</code>: <code>WEB_PORT</code>, <code>API_WORKERS</code>, <code>LOG_LEVEL</code>.<br>api: <code>PORT</code>, <code>WORKERS</code>, <code>LINK_DIR</code>, <code>LOCATIONS_CSV</code>.<br>web: <code>API_HOST</code>, <code>API_PORT</code></td><td>Settings can change without editing the Dockerfiles or the code. The Dockerfiles set sensible defaults with <code>ENV</code>, and compose overrides them.</td></tr>
+<tr><td>Start-up order</td><td><code>HEALTHCHECK</code> in both images, plus <code>depends_on: condition: service_healthy</code></td><td>nginx only starts once the API has actually loaded the 10,000 locations and answers <code>/health</code>, not just when its container has started.</td></tr>
+<tr><td>Other</td><td>Non-root <code>appuser</code>, <code>restart: unless-stopped</code>, <code>.dockerignore</code>, requirements copied before the code</td><td>Safer, restarts after a crash, keeps junk out of the image, and the slow <code>pip install</code> layer is cached when only <code>app.py</code> changes.</td></tr>
+</table>
+<p>The only change to the Lab 7 code was in <code>app.py</code>: a <code>LINK_DIR</code> variable so link files can be read from the mounted <code>/data</code> folder, and a small <code>/health</code> route for the health check.</p>
+
+<h3>The Dockerfiles</h3>
+<div class="two">
+<pre>{{API_DOCKERFILE}}</pre>
+<pre>{{WEB_DOCKERFILE}}
+
+<b># web/nginx.conf.template</b>
+{{NGINX}}</pre>
+</div>
+
+<h3>docker-compose.yml and .env</h3>
+<div class="two">
+<pre>{{COMPOSE}}</pre>
+<pre><b># .env</b>
+{{ENV}}
+
+<b># Project layout</b>
+Lab_Docker_12341060/
+├── docker-compose.yml
+├── .env
+├── api/
+│   ├── Dockerfile
+│   ├── .dockerignore
+│   ├── app.py
+│   ├── requirements.txt
+│   └── locations.csv
+├── web/
+│   ├── Dockerfile
+│   ├── .dockerignore
+│   ├── nginx.conf.template
+│   └── index.html
+└── data/
+    └── sample_link.txt</pre>
+</div>
+
+<h2>2. Steps I followed</h2>
+<h3>Step 1: Install Docker</h3>
+<p>Docker wasn't installed on my Mac. Instead of Docker Desktop I used <b>Colima</b>, a free, open-source tool that runs the Docker engine inside a small Linux VM. I installed it and the Docker CLI tools with Homebrew:</p>
+<pre>brew install colima docker docker-compose docker-buildx</pre>
+<p>Homebrew installs Compose and Buildx as plugins, so I added <code>"cliPluginsExtraDirs": ["/opt/homebrew/lib/docker/cli-plugins"]</code> to <code>~/.docker/config.json</code> so that <code>docker compose</code> works.</p>
+<figure><img src="img/t01_install_and_no_daemon.jpg">
+<figcaption><b>Figure 1.</b> The tools installed (Docker 29.9, Compose 5.6, Buildx 0.38, Colima 0.10). But <code>docker ps</code> failed because no Docker engine was running yet (error 1 in Section 3).</figcaption></figure>
+
+<figure><img src="img/t02_colima_start.jpg">
+<figcaption><b>Figure 2.</b> <code>colima start --cpu 2 --memory 4 --disk 20</code> downloads an Ubuntu VM, starts the Docker engine inside it, and switches the Docker context to <code>colima</code>.</figcaption></figure>
+
+<figure><img src="img/t03_creds_error.jpg">
+<figcaption><b>Figure 3.</b> The engine was running (Ubuntu 24.04, arm64, 2 CPUs, 4 GB), but the first image pull failed with <code>docker-credential-desktop: executable file not found</code> (error 2).</figcaption></figure>
+
+<figure><img src="img/t04_creds_fixed.jpg">
+<figcaption><b>Figure 4.</b> After fixing <code>~/.docker/config.json</code>, <code>hello-world</code> pulled and ran, so Docker was working.</figcaption></figure>
+
+<h3>Step 2: Build and run the stack</h3>
+<p>I first checked the compose file with <code>docker compose config</code>, then built both images and started everything with one command:</p>
+<figure><img src="img/t05_compose_up_build.jpg">
+<figcaption><b>Figure 5.</b> <code>docker compose up -d --build</code> builds both images, creates the two networks, starts the API, waits until it is <b>Healthy</b>, and only then starts nginx. The middle of the build log is trimmed.</figcaption></figure>
+
+<figure><img src="img/t06_port_conflict.jpg">
+<figcaption><b>Figure 6.</b> Both containers were up, but <code>http://localhost:8080</code> returned a plain "404: Not Found" that didn't come from nginx (error 3). <code>lsof</code> showed an old Python load balancer from another lab still listening on 8080. Inside the container, nginx itself was fine.</figcaption></figure>
+
+<figure><img src="img/t07_new_port_tests.jpg">
+<figcaption><b>Figure 7.</b> I changed <code>WEB_PORT</code> to 8088 in <code>.env</code> and ran <code>docker compose up -d</code>, which recreated only the web container. Then I tested the API: the UI returns HTTP 200, a search on the full grid works, uploading <code>sample_link.txt</code> works, and so does giving the link file by name from the mounted <code>/data</code> volume. The 10 IDs are the same as in my Lab 7 report.</figcaption></figure>
+
+<figure><img src="img/ui_search.jpg">
+<figcaption><b>Figure 8.</b> The Lab 7 web UI at <code>http://localhost:8088</code>, now served by the nginx container. I uploaded <code>sample_link.txt</code> and searched for banks within 0.2 of (0.5, 0.5); the request went through nginx to the API container.</figcaption></figure>
+
+<h3>Step 3: Check images, networks, volumes and environment variables</h3>
+<figure><img src="img/t08_images_networks.jpg">
+<figcaption><b>Figure 9.</b> The two images (api 316 MB, web 76 MB) and the two networks. The api container is only on <code>backend</code>, while web is on both. From inside the web container, <code>http://api:8000</code> works by service name. <code>docker port</code> shows that the API has no host port at all.</figcaption></figure>
+
+<figure><img src="img/t09_env_mounts_health_logs.jpg">
+<figcaption><b>Figure 10.</b> Inside the API container: it runs as <code>appuser</code>, not root, the environment variables from compose are set, and <code>./data</code> is bind-mounted at <code>/data</code> read-only. Both health checks pass. The logs show requests arriving at the API from nginx (172.19.0.3), and <code>docker stats</code> shows the API using about 126 MB and nginx about 3 MB.</figcaption></figure>
+
+<figure><img src="img/t10_rebuild_web.jpg">
+<figcaption><b>Figure 11.</b> After fixing an nginx warning (error 4), <code>docker compose up -d --build web</code> rebuilt and recreated only the web container. The API kept running.</figcaption></figure>
+
+<figure><img src="img/t11_down_up_final.jpg">
+<figcaption><b>Figure 12.</b> The final test: <code>docker compose down</code> removes everything, then the single command <code>docker compose up -d --build</code> brings the whole stack back. A new query (hospitals near (0.25, 0.75) using the link file) returns 10 reachable results (<code>.table.py</code> was a tiny script I used to print the JSON as a table).</figcaption></figure>
+
+<h2>3. Errors I faced and how I fixed them</h2>
+<table class="err">
+<colgroup><col style="width:4%"><col style="width:30%"><col style="width:33%"><col style="width:33%"></colgroup>
+<tr><th>#</th><th>Error</th><th>Cause</th><th>Fix</th></tr>
+<tr><td>1</td><td><code>failed to connect to the docker API at unix:///Users/.../.docker/run/docker.sock</code></td><td>Installing the Docker CLI doesn't install an engine. The CLI was also still set to an old Docker Desktop context (<code>desktop-linux</code>) whose socket no longer exists.</td><td>Started the engine with <code>colima start</code>, which also created and switched to the <code>colima</code> context (checked with <code>docker context ls</code>).</td></tr>
+<tr><td>2</td><td><code>error getting credentials - exec: "docker-credential-desktop": executable file not found in $PATH</code></td><td>The old Docker Desktop install had left <code>"credsStore": "desktop"</code> in <code>~/.docker/config.json</code>, but that helper program is gone, so every image pull failed.</td><td>Backed up the config and removed the <code>credsStore</code> line. Pulls worked straight away.</td></tr>
+<tr><td>3</td><td><code>localhost:8080</code> returned "404: Not Found" (and the JSON parse in my test failed)</td><td>Port 8080 on my Mac was already used by a Python load balancer from an earlier lab, which answered first. nginx was fine (<code>docker exec ... wget</code> returned OK).</td><td>Found it with <code>lsof -iTCP:8080</code>. Rather than kill another project, I changed <code>WEB_PORT=8088</code> in <code>.env</code>. No Dockerfile or code change was needed.</td></tr>
+<tr><td>4</td><td>nginx warning: <code>a client request body is buffered to a temporary file</code></td><td>The road-link file is about 145 KB, bigger than nginx's default 16 KB body buffer, so every upload was written to disk first.</td><td>Added <code>client_body_buffer_size 1m;</code> to the nginx config and rebuilt only the web service. The warning no longer appears.</td></tr>
+</table>
+<p>Port 8000 on my Mac was also in use, by another project's app. That didn't cause a problem only because the API container doesn't publish its port to the host.</p>
+
+<h2>4. Docker commands used</h2>
+<p>In the order I ran them:</p>
+<pre style="break-inside:auto">brew install colima docker docker-compose docker-buildx
+docker --version;  docker compose version;  docker buildx version;  colima version
+docker ps                                   # failed: no engine yet
+colima start --cpu 2 --memory 4 --disk 20
+docker context ls
+docker info
+docker run --rm hello-world                 # failed (credsStore), then worked after the fix
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps
+docker exec proximity-web wget -qO- http://127.0.0.1/health
+docker compose up -d                        # after changing WEB_PORT in .env
+docker images
+docker network ls --filter name=proximity
+docker network inspect proximity-search_backend
+docker exec proximity-web wget -qO- http://api:8000/health
+docker port proximity-api;  docker port proximity-web
+docker exec proximity-api sh -c 'whoami; env; ls -l /data'
+docker inspect proximity-api --format '{{range .Mounts}}...{{end}}'
+docker inspect --format '{{.State.Health.Status}}' proximity-api proximity-web
+docker compose logs --tail 6 api
+docker stats --no-stream
+docker compose up -d --build web
+docker compose down
+docker compose up -d --build</pre>
+
+<h3 style="break-before: page">Unique commands and their purpose</h3>
+<table>
+<tr><th>Command</th><th>Purpose</th></tr>
+<tr><td><code>colima start</code></td><td>Starts the Linux VM that runs the Docker engine on macOS (with CPU, memory and disk limits)</td></tr>
+<tr><td><code>docker --version</code> / <code>docker compose version</code></td><td>Checks that the CLI and the Compose plugin are installed</td></tr>
+<tr><td><code>docker context ls</code></td><td>Lists the Docker engines the CLI can talk to and shows which one is active</td></tr>
+<tr><td><code>docker info</code></td><td>Shows details of the engine: version, OS, architecture, CPUs and memory</td></tr>
+<tr><td><code>docker run --rm hello-world</code></td><td>Pulls and runs a test image to check the installation, then removes the container</td></tr>
+<tr><td><code>docker ps</code></td><td>Lists running containers (also a quick check that the engine is reachable)</td></tr>
+<tr><td><code>docker compose config</code></td><td>Validates the compose file and fills in the <code>.env</code> values</td></tr>
+<tr><td><code>docker compose up -d --build</code></td><td>Builds the images, creates the networks and starts all services in the background</td></tr>
+<tr><td><code>docker compose up -d --build web</code></td><td>Rebuilds and restarts just one service</td></tr>
+<tr><td><code>docker compose ps</code></td><td>Shows the project's containers, their health status and ports</td></tr>
+<tr><td><code>docker compose logs</code></td><td>Shows the output (logs) of the services</td></tr>
+<tr><td><code>docker compose down</code></td><td>Stops and removes the project's containers and networks</td></tr>
+<tr><td><code>docker images</code></td><td>Lists local images and their sizes</td></tr>
+<tr><td><code>docker network ls</code> / <code>docker network inspect</code></td><td>Lists networks, and shows which containers are on a network and their IPs</td></tr>
+<tr><td><code>docker exec</code></td><td>Runs a command inside a running container (used to test DNS, the environment and mounts)</td></tr>
+<tr><td><code>docker port</code></td><td>Shows which container ports are published on the host</td></tr>
+<tr><td><code>docker inspect</code></td><td>Shows low-level details of a container, like mounts and health status</td></tr>
+<tr><td><code>docker stats --no-stream</code></td><td>One snapshot of each container's CPU, memory and network use</td></tr>
+</table>
+
+<h2>5. What I learnt</h2>
+<p>Before this lab I thought of Docker as just "running my app in a box". Splitting the app into two services made me think about how the containers talk to each other. The nicest part was that nginx can reach the API as just <code>http://api:8000</code>, because Docker runs its own DNS on user-defined networks. Also, by not publishing the API's port at all, the API simply isn't reachable from outside, which I could prove with <code>docker port</code>. I also learnt that <code>depends_on</code> on its own only waits for a container to <i>start</i>. To wait until the API is actually ready, I needed a health check and <code>condition: service_healthy</code>.</p>
+<p>Most of my errors had nothing to do with my Dockerfiles. They came from my laptop: leftover Docker Desktop settings and a port already used by an old lab. That taught me to read error messages carefully and check the environment (<code>docker context ls</code>, <code>lsof</code>, <code>docker exec</code> into the container) before changing my own files. Keeping the host port in <code>.env</code> paid off immediately: fixing the conflict was a one-line change.</p>
+<p>I also understood layer caching better. Because <code>requirements.txt</code> is copied and installed before <code>app.py</code>, rebuilding after a code change skips the slow <code>pip install</code> step. And with a bind-mounted volume, data like link files can change without rebuilding the image at all. In the end the whole stack, which used to mean setting up Python, a virtualenv and the right packages, now starts on any machine with Docker using one command: <code>docker compose up -d --build</code>.</p>
+
+</body>
+</html>
